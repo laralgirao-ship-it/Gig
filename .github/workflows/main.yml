@@ -5,87 +5,60 @@ on:
   push:
     branches: [ main ]
 
+env:
+  # candidatos comuns onde pode estar o app (ajuste se quiser)
+  APP_CANDIDATES: . ROV_Project/ROV_VoiceApp app packages/app
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      CI: "1" # ⬅️ modo não-interativo para Expo/EAS (evita --non-interactive). Docs recomendam CI. 
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Detecta automaticamente onde está o package.json do app
-      - name: Detect APP_PATH (auto)
+      - name: Detect APP_PATH
         id: detect
         shell: bash
         run: |
           set -e
-          echo ">> Detectando app path..."
-          CANDIDATES=("." "ROV_Project/ROV_VoiceApp" "app" "packages/app")
-          FOUND=""
-          for p in "${CANDIDATES[@]}"; do
-            if [ -f "$p/package.json" ]; then
-              FOUND="$p"
-              break
-            fi
+          for p in $APP_CANDIDATES; do
+            if [ -f "$p/package.json" ]; then APP_PATH="$p"; break; fi
           done
-          if [ -z "$FOUND" ]; then
-            echo "❌ Nenhum package.json encontrado nestes caminhos:"
-            printf ' - %s\n' "${CANDIDATES[@]}"
-            echo "Árvore do repo:"
-            ls -la
-            exit 1
+          if [ -z "${APP_PATH:-}" ]; then
+            echo "Nenhum package.json encontrado nos candidatos: $APP_CANDIDATES"
+            ls -la; exit 1
           fi
-          echo "✅ APP_PATH detectado: $FOUND"
-          echo "APP_PATH=$FOUND" >> "$GITHUB_ENV"
-          echo "LOG_DIR=$FOUND/_logs" >> "$GITHUB_ENV"
-          mkdir -p "$FOUND/_logs"
-          echo "APP_PATH=$FOUND"    # só para log
+          echo "APP_PATH=$APP_PATH" | tee -a "$GITHUB_ENV"
+          echo "LOG_DIR=$APP_PATH/_logs" | tee -a "$GITHUB_ENV"
+          mkdir -p "$APP_PATH/_logs"
+          echo "App path: $APP_PATH"
 
       - name: Show trees
-        shell: bash
         run: |
-          echo "ROOT:"
-          ls -la
-          echo "APP_PATH (${APP_PATH}):"
-          ls -la "${APP_PATH}" || true
+          echo "ROOT:"; ls -la
+          echo "APP:";  ls -la "${APP_PATH}"
 
-      - name: Setup Node.js (no cache)
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 18
 
-      # Patch seguro no package.json – só se existir
-      - name: Patch package.json (safe if present)
-        shell: bash
+      # Patch seguro: remove react-native-voice antigo (se houver),
+      # garante expo-speech e fixa react-native-svg @ 15.12.1 (aviso do Expo)
+      - name: Patch package.json (safe)
         run: |
-          if [ ! -f "${APP_PATH}/package.json" ]; then
-            echo "⚠️ ${APP_PATH}/package.json não existe; pulando patch."
-            exit 0
-          fi
           node -e '
-            const fs = require("fs");
-            const path = process.env.APP_PATH + "/package.json";
-            const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
-            const deps = pkg.dependencies || (pkg.dependencies = {});
-
-            // remove dependência antiga se existir
-            if (deps["react-native-voice"]) {
-              delete deps["react-native-voice"];
-              console.log("Removed dependency: react-native-voice");
-            }
-            // garante expo-speech
-            if (!deps["expo-speech"]) {
-              deps["expo-speech"] = "*";
-              console.log("Added dependency: expo-speech");
-            }
-            // fixa react-native-svg (compat avisada pelo Expo)
-            if (deps["react-native-svg"] && deps["react-native-svg"] !== "15.12.1") {
-              deps["react-native-svg"] = "15.12.1";
-              console.log("Pinned react-native-svg@15.12.1");
-            }
-
-            fs.writeFileSync(path, JSON.stringify(pkg, null, 2));
-            console.log("package.json patched at", path);
+            const fs=require("fs"), p=process.env.APP_PATH+"/package.json";
+            if(!fs.existsSync(p)){ console.log("Sem package.json; pulando patch."); process.exit(0); }
+            const pkg=JSON.parse(fs.readFileSync(p,"utf8"));
+            const d=pkg.dependencies||(pkg.dependencies={});
+            if(d["react-native-voice"]){ delete d["react-native-voice"]; console.log("Removed react-native-voice"); }
+            if(!d["expo-speech"]){ d["expo-speech"]="*"; console.log("Added expo-speech"); }
+            if(d["react-native-svg"] && d["react-native-svg"]!=="15.12.1"){ d["react-native-svg"]="15.12.1"; console.log("Pinned react-native-svg@15.12.1"); }
+            fs.writeFileSync(p, JSON.stringify(pkg,null,2)); console.log("Patched", p);
           '
 
       - name: Install dependencies
@@ -106,21 +79,27 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | sdkmanager --licenses
 
-      - name: Expo prebuild (Android) + force SDK 36
+      # prebuild cria a pasta android/ (CI=1 evita prompts).
+      # app.config(.js) precisa ter android.package. 
+      - name: Expo prebuild (Android)
         working-directory: ${{ env.APP_PATH }}
         run: |
-          set -e
-          npx expo prebuild --platform android --non-interactive | tee "${LOG_DIR}/prebuild.log"
-          sed -i 's/^android\.compileSdkVersion=.*/android.compileSdkVersion=36/g' android/gradle.properties || true
-          sed -i 's/^android\.targetSdkVersion=.*/android.targetSdkVersion=36/g'   android/gradle.properties || true
-          grep -q '^android.useAndroidX=true'    android/gradle.properties || echo 'android.useAndroidX=true'    >> android/gradle.properties
-          grep -q '^android.enableJetifier=true' android/gradle.properties || echo 'android.enableJetifier=true' >> android/gradle.properties
-          chmod +x android/gradlew || true
+          npx expo prebuild --platform android --no-install | tee "${LOG_DIR}/prebuild.log"
+
+      # Só force gradle.properties se ele existir (após prebuild).
+      - name: Force compile/target SDK 36 and AndroidX/Jetifier
+        if: ${{ hashFiles(format('{0}/android/gradle.properties', env.APP_PATH)) != '' }}
+        run: |
+          G="${APP_PATH}/android/gradle.properties"
+          sed -i 's/^android\.compileSdkVersion=.*/android.compileSdkVersion=36/g' "$G" || true
+          sed -i 's/^android\.targetSdkVersion=.*/android.targetSdkVersion=36/g'   "$G" || true
+          grep -q '^android.useAndroidX=true'    "$G" || echo 'android.useAndroidX=true'    >> "$G"
+          grep -q '^android.enableJetifier=true' "$G" || echo 'android.enableJetifier=true' >> "$G"
+          chmod +x "${APP_PATH}/android/gradlew" || true
 
       - name: Build APK (Debug)
         working-directory: ${{ env.APP_PATH }}/android
-        run: |
-          ./gradlew assembleDebug --no-daemon --stacktrace | tee "${LOG_DIR}/gradle-debug.log"
+        run: ./gradlew assembleDebug --no-daemon --stacktrace | tee "${LOG_DIR}/gradle-debug.log"
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
@@ -131,8 +110,7 @@ jobs:
 
       - name: Build APK (Release unsigned)
         working-directory: ${{ env.APP_PATH }}/android
-        run: |
-          ./gradlew assembleRelease --no-daemon --stacktrace | tee "${LOG_DIR}/gradle-release.log"
+        run: ./gradlew assembleRelease --no-daemon --stacktrace | tee "${LOG_DIR}/gradle-release.log"
 
       - name: Upload Release APK (unsigned)
         uses: actions/upload-artifact@v4
@@ -146,5 +124,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
-          path: ${{ env.LOG_DIR }}/*.log
+          path: ${{ env.APP_PATH }}/_logs/*.log
           if-no-files-found: warn
