@@ -6,60 +6,49 @@ on:
     branches: [ main ]
 
 env:
-  # candidatos comuns onde pode estar o app (ajuste se quiser)
-  APP_CANDIDATES: . ROV_Project/ROV_VoiceApp app packages/app
+  # ⚠️ AJUSTE AQUI se seu app estiver noutro caminho.
+  APP_PATH: ROV_Project/ROV_VoiceApp
+  LOG_DIR: ROV_Project/ROV_VoiceApp/_logs
 
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      CI: "1" # ⬅️ modo não-interativo para Expo/EAS (evita --non-interactive). Docs recomendam CI. 
+      CI: "1"  # modo não-interativo recomendado pelo Expo
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Detect APP_PATH
-        id: detect
-        shell: bash
+      - name: Sanity check (APP_PATH)
         run: |
-          set -e
-          for p in $APP_CANDIDATES; do
-            if [ -f "$p/package.json" ]; then APP_PATH="$p"; break; fi
-          done
-          if [ -z "${APP_PATH:-}" ]; then
-            echo "Nenhum package.json encontrado nos candidatos: $APP_CANDIDATES"
-            ls -la; exit 1
-          fi
-          echo "APP_PATH=$APP_PATH" | tee -a "$GITHUB_ENV"
-          echo "LOG_DIR=$APP_PATH/_logs" | tee -a "$GITHUB_ENV"
-          mkdir -p "$APP_PATH/_logs"
-          echo "App path: $APP_PATH"
+          echo "APP_PATH=${APP_PATH}"
+          test -f "${APP_PATH}/package.json" || { echo "❌ package.json não encontrado em ${APP_PATH}"; ls -la; exit 1; }
+          mkdir -p "${LOG_DIR}"
 
       - name: Show trees
         run: |
           echo "ROOT:"; ls -la
-          echo "APP:";  ls -la "${APP_PATH}"
+          echo "APP:";  ls -la "${APP_PATH}" || true
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 18
 
-      # Patch seguro: remove react-native-voice antigo (se houver),
-      # garante expo-speech e fixa react-native-svg @ 15.12.1 (aviso do Expo)
+      # Patch opcional e seguro (não falha se nada a fazer)
       - name: Patch package.json (safe)
+        working-directory: ${{ env.APP_PATH }}
         run: |
           node -e '
-            const fs=require("fs"), p=process.env.APP_PATH+"/package.json";
-            if(!fs.existsSync(p)){ console.log("Sem package.json; pulando patch."); process.exit(0); }
+            const fs=require("fs"), p="package.json";
             const pkg=JSON.parse(fs.readFileSync(p,"utf8"));
             const d=pkg.dependencies||(pkg.dependencies={});
             if(d["react-native-voice"]){ delete d["react-native-voice"]; console.log("Removed react-native-voice"); }
             if(!d["expo-speech"]){ d["expo-speech"]="*"; console.log("Added expo-speech"); }
             if(d["react-native-svg"] && d["react-native-svg"]!=="15.12.1"){ d["react-native-svg"]="15.12.1"; console.log("Pinned react-native-svg@15.12.1"); }
             fs.writeFileSync(p, JSON.stringify(pkg,null,2)); console.log("Patched", p);
-          '
+          ' || true
 
       - name: Install dependencies
         working-directory: ${{ env.APP_PATH }}
@@ -79,18 +68,35 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | sdkmanager --licenses
 
-      # prebuild cria a pasta android/ (CI=1 evita prompts).
-      # app.config(.js) precisa ter android.package. 
+      - name: Ensure android.package is set
+        working-directory: ${{ env.APP_PATH }}
+        run: |
+          node -e '
+            const fs=require("fs");
+            const cand=["app.config.js","app.json"];
+            let ok=false;
+            for(const f of cand){
+              if(fs.existsSync(f)){
+                const txt=fs.readFileSync(f,"utf8");
+                if(/android\\s*:\\s*{[\\s\\S]*package\\s*:\\s*["'+"'"+`']`+"[\\w\\.\\_]+["'"+'"]/.test(txt) || /"android"\\s*:\\s*{[\\s\\S]*"package"\\s*:\\s*"/.test(txt)){
+                  ok=true; break;
+                }
+              }
+            }
+            if(!ok){ throw new Error("android.package ausente em app.config.js/app.json"); }
+            console.log("android.package OK");
+          '
+
       - name: Expo prebuild (Android)
         working-directory: ${{ env.APP_PATH }}
         run: |
           npx expo prebuild --platform android --no-install | tee "${LOG_DIR}/prebuild.log"
+          test -d android || { echo "❌ prebuild não gerou ${APP_PATH}/android. Verifique ${LOG_DIR}/prebuild.log"; exit 1; }
 
-      # Só force gradle.properties se ele existir (após prebuild).
       - name: Force compile/target SDK 36 and AndroidX/Jetifier
-        if: ${{ hashFiles(format('{0}/android/gradle.properties', env.APP_PATH)) != '' }}
         run: |
           G="${APP_PATH}/android/gradle.properties"
+          test -f "$G" || { echo "❌ gradle.properties não encontrado em ${G}"; exit 1; }
           sed -i 's/^android\.compileSdkVersion=.*/android.compileSdkVersion=36/g' "$G" || true
           sed -i 's/^android\.targetSdkVersion=.*/android.targetSdkVersion=36/g'   "$G" || true
           grep -q '^android.useAndroidX=true'    "$G" || echo 'android.useAndroidX=true'    >> "$G"
@@ -106,7 +112,7 @@ jobs:
         with:
           name: app-debug-apk
           path: ${{ env.APP_PATH }}/android/app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
       - name: Build APK (Release unsigned)
         working-directory: ${{ env.APP_PATH }}/android
@@ -117,12 +123,12 @@ jobs:
         with:
           name: app-release-unsigned-apk
           path: ${{ env.APP_PATH }}/android/app/build/outputs/apk/release/app-release-unsigned.apk
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
       - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
-          path: ${{ env.APP_PATH }}/_logs/*.log
+          path: ${{ env.LOG_DIR }}/*.log
           if-no-files-found: warn
