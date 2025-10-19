@@ -30,10 +30,46 @@ jobs:
         with:
           node-version: 18
 
+      # ✅ Patch automático no package.json (1 arquivo só)
+      # - remove react-native-voice se existir (versão antiga e inexistente)
+      # - garante expo-speech
+      # - fixa react-native-svg@15.12.1 (aviso do Expo)
+      - name: Patch package.json (safe)
+        working-directory: ${{ env.APP_PATH }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const p = "package.json";
+            const pkg = JSON.parse(fs.readFileSync(p, "utf8"));
+
+            const deps = pkg.dependencies || (pkg.dependencies = {});
+
+            // remover lib antiga se existir
+            if (deps["react-native-voice"]) {
+              delete deps["react-native-voice"];
+              console.log("Removed dependency: react-native-voice");
+            }
+
+            // garantir expo-speech
+            if (!deps["expo-speech"]) {
+              deps["expo-speech"] = "*";
+              console.log("Added dependency: expo-speech");
+            }
+
+            // ajustar react-native-svg
+            if (deps["react-native-svg"] && deps["react-native-svg"] !== "15.12.1") {
+              deps["react-native-svg"] = "15.12.1";
+              console.log("Pinned react-native-svg@15.12.1");
+            }
+
+            fs.writeFileSync(p, JSON.stringify(pkg, null, 2));
+            console.log("package.json patched");
+          '
+
       - name: Install dependencies
         working-directory: ${{ env.APP_PATH }}
         run: |
-          npm ci || npm install
+          npm install --no-audit --no-fund
           npx expo --version || npx --yes expo-cli --version || true
 
       - name: Setup Java 17
