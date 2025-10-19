@@ -6,37 +6,35 @@ on:
     branches: [ main ]
 
 env:
-  # ⚠️ AJUSTE AQUI se seu app estiver noutro caminho.
-  APP_PATH: ROV_Project/ROV_VoiceApp
-  LOG_DIR: ROV_Project/ROV_VoiceApp/_logs
+  APP_PATH: .
+  LOG_DIR: _logs
 
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      CI: "1"  # modo não-interativo recomendado pelo Expo
+      CI: "1"  # modo não-interativo para Expo
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Sanity check (APP_PATH)
+      - name: Show tree (root)
         run: |
-          echo "APP_PATH=${APP_PATH}"
-          test -f "${APP_PATH}/package.json" || { echo "❌ package.json não encontrado em ${APP_PATH}"; ls -la; exit 1; }
-          mkdir -p "${LOG_DIR}"
+          echo "ROOT:"
+          ls -la
 
-      - name: Show trees
+      - name: Sanity check
         run: |
-          echo "ROOT:"; ls -la
-          echo "APP:";  ls -la "${APP_PATH}" || true
+          test -f "${APP_PATH}/package.json" || { echo "❌ package.json não encontrado em ${APP_PATH}"; exit 1; }
+          mkdir -p "${LOG_DIR}"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 18
 
-      # Patch opcional e seguro (não falha se nada a fazer)
+      # Patch opcional: remove dependência antiga, garante expo-speech e fixa react-native-svg
       - name: Patch package.json (safe)
         working-directory: ${{ env.APP_PATH }}
         run: |
@@ -68,61 +66,63 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | sdkmanager --licenses
 
-      - name: Ensure android.package is set
+      # Garante android.package no app.json (raiz)
+      - name: Ensure android.package in app.json
         working-directory: ${{ env.APP_PATH }}
         run: |
           node -e '
-            const fs=require("fs");
-            const cand=["app.config.js","app.json"];
-            let ok=false;
-            for(const f of cand){
-              if(fs.existsSync(f)){
-                const txt=fs.readFileSync(f,"utf8");
-                if(/android\\s*:\\s*{[\\s\\S]*package\\s*:\\s*["'+"'"+`']`+"[\\w\\.\\_]+["'"+'"]/.test(txt) || /"android"\\s*:\\s*{[\\s\\S]*"package"\\s*:\\s*"/.test(txt)){
-                  ok=true; break;
-                }
-              }
+            const fs=require("fs"), p="app.json";
+            if(!fs.existsSync(p)) { console.log("No app.json, skipping"); process.exit(0); }
+            const cfg=JSON.parse(fs.readFileSync(p,"utf8"));
+            cfg.expo = cfg.expo || {};
+            cfg.expo.android = cfg.expo.android || {};
+            if(!cfg.expo.android.package){
+              cfg.expo.android.package = "com.laralgirao.rovassistant"; // ajuste se quiser
+              cfg.expo.android.versionCode = cfg.expo.android.versionCode || 1;
+              console.log("Set android.package to", cfg.expo.android.package);
+            } else {
+              console.log("android.package already set:", cfg.expo.android.package);
+              cfg.expo.android.versionCode = cfg.expo.android.versionCode || 1;
             }
-            if(!ok){ throw new Error("android.package ausente em app.config.js/app.json"); }
-            console.log("android.package OK");
+            fs.writeFileSync(p, JSON.stringify(cfg,null,2));
           '
 
       - name: Expo prebuild (Android)
         working-directory: ${{ env.APP_PATH }}
         run: |
           npx expo prebuild --platform android --no-install | tee "${LOG_DIR}/prebuild.log"
-          test -d android || { echo "❌ prebuild não gerou ${APP_PATH}/android. Verifique ${LOG_DIR}/prebuild.log"; exit 1; }
+          test -d android || { echo "❌ prebuild não gerou ./android. Veja ${LOG_DIR}/prebuild.log"; exit 1; }
 
       - name: Force compile/target SDK 36 and AndroidX/Jetifier
         run: |
-          G="${APP_PATH}/android/gradle.properties"
-          test -f "$G" || { echo "❌ gradle.properties não encontrado em ${G}"; exit 1; }
+          G="android/gradle.properties"
+          test -f "$G" || { echo "❌ gradle.properties não encontrado em $G"; exit 1; }
           sed -i 's/^android\.compileSdkVersion=.*/android.compileSdkVersion=36/g' "$G" || true
           sed -i 's/^android\.targetSdkVersion=.*/android.targetSdkVersion=36/g'   "$G" || true
           grep -q '^android.useAndroidX=true'    "$G" || echo 'android.useAndroidX=true'    >> "$G"
           grep -q '^android.enableJetifier=true' "$G" || echo 'android.enableJetifier=true' >> "$G"
-          chmod +x "${APP_PATH}/android/gradlew" || true
+          chmod +x "android/gradlew" || true
 
       - name: Build APK (Debug)
-        working-directory: ${{ env.APP_PATH }}/android
+        working-directory: android
         run: ./gradlew assembleDebug --no-daemon --stacktrace | tee "${LOG_DIR}/gradle-debug.log"
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug-apk
-          path: ${{ env.APP_PATH }}/android/app/build/outputs/apk/debug/app-debug.apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: warn
 
       - name: Build APK (Release unsigned)
-        working-directory: ${{ env.APP_PATH }}/android
+        working-directory: android
         run: ./gradlew assembleRelease --no-daemon --stacktrace | tee "${LOG_DIR}/gradle-release.log"
 
       - name: Upload Release APK (unsigned)
         uses: actions/upload-artifact@v4
         with:
           name: app-release-unsigned-apk
-          path: ${{ env.APP_PATH }}/android/app/build/outputs/apk/release/app-release-unsigned.apk
+          path: android/app/build/outputs/apk/release/app-release-unsigned.apk
           if-no-files-found: warn
 
       - name: Upload build logs
