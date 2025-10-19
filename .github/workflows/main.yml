@@ -5,10 +5,6 @@ on:
   push:
     branches: [ main ]
 
-env:
-  APP_PATH: ROV_Project/ROV_VoiceApp
-  LOG_DIR: ROV_Project/ROV_VoiceApp/_logs
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -17,53 +13,79 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Ensure logs dir + show tree
+      # Detecta automaticamente onde está o package.json do app
+      - name: Detect APP_PATH (auto)
+        id: detect
+        shell: bash
         run: |
-          mkdir -p "${{ env.LOG_DIR }}"
+          set -e
+          echo ">> Detectando app path..."
+          CANDIDATES=("." "ROV_Project/ROV_VoiceApp" "app" "packages/app")
+          FOUND=""
+          for p in "${CANDIDATES[@]}"; do
+            if [ -f "$p/package.json" ]; then
+              FOUND="$p"
+              break
+            fi
+          done
+          if [ -z "$FOUND" ]; then
+            echo "❌ Nenhum package.json encontrado nestes caminhos:"
+            printf ' - %s\n' "${CANDIDATES[@]}"
+            echo "Árvore do repo:"
+            ls -la
+            exit 1
+          fi
+          echo "✅ APP_PATH detectado: $FOUND"
+          echo "APP_PATH=$FOUND" >> "$GITHUB_ENV"
+          echo "LOG_DIR=$FOUND/_logs" >> "$GITHUB_ENV"
+          mkdir -p "$FOUND/_logs"
+          echo "APP_PATH=$FOUND"    # só para log
+
+      - name: Show trees
+        shell: bash
+        run: |
           echo "ROOT:"
           ls -la
-          echo "APP_PATH:"
-          ls -la "${{ env.APP_PATH }}" || true
+          echo "APP_PATH (${APP_PATH}):"
+          ls -la "${APP_PATH}" || true
 
       - name: Setup Node.js (no cache)
         uses: actions/setup-node@v4
         with:
           node-version: 18
 
-      # ✅ Patch automático no package.json (1 arquivo só)
-      # - remove react-native-voice se existir (versão antiga e inexistente)
-      # - garante expo-speech
-      # - fixa react-native-svg@15.12.1 (aviso do Expo)
-      - name: Patch package.json (safe)
-        working-directory: ${{ env.APP_PATH }}
+      # Patch seguro no package.json – só se existir
+      - name: Patch package.json (safe if present)
+        shell: bash
         run: |
+          if [ ! -f "${APP_PATH}/package.json" ]; then
+            echo "⚠️ ${APP_PATH}/package.json não existe; pulando patch."
+            exit 0
+          fi
           node -e '
             const fs = require("fs");
-            const p = "package.json";
-            const pkg = JSON.parse(fs.readFileSync(p, "utf8"));
-
+            const path = process.env.APP_PATH + "/package.json";
+            const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
             const deps = pkg.dependencies || (pkg.dependencies = {});
 
-            // remover lib antiga se existir
+            // remove dependência antiga se existir
             if (deps["react-native-voice"]) {
               delete deps["react-native-voice"];
               console.log("Removed dependency: react-native-voice");
             }
-
-            // garantir expo-speech
+            // garante expo-speech
             if (!deps["expo-speech"]) {
               deps["expo-speech"] = "*";
               console.log("Added dependency: expo-speech");
             }
-
-            // ajustar react-native-svg
+            // fixa react-native-svg (compat avisada pelo Expo)
             if (deps["react-native-svg"] && deps["react-native-svg"] !== "15.12.1") {
               deps["react-native-svg"] = "15.12.1";
               console.log("Pinned react-native-svg@15.12.1");
             }
 
-            fs.writeFileSync(p, JSON.stringify(pkg, null, 2));
-            console.log("package.json patched");
+            fs.writeFileSync(path, JSON.stringify(pkg, null, 2));
+            console.log("package.json patched at", path);
           '
 
       - name: Install dependencies
@@ -88,7 +110,7 @@ jobs:
         working-directory: ${{ env.APP_PATH }}
         run: |
           set -e
-          npx expo prebuild --platform android --non-interactive | tee "${{ env.LOG_DIR }}/prebuild.log"
+          npx expo prebuild --platform android --non-interactive | tee "${LOG_DIR}/prebuild.log"
           sed -i 's/^android\.compileSdkVersion=.*/android.compileSdkVersion=36/g' android/gradle.properties || true
           sed -i 's/^android\.targetSdkVersion=.*/android.targetSdkVersion=36/g'   android/gradle.properties || true
           grep -q '^android.useAndroidX=true'    android/gradle.properties || echo 'android.useAndroidX=true'    >> android/gradle.properties
@@ -98,7 +120,7 @@ jobs:
       - name: Build APK (Debug)
         working-directory: ${{ env.APP_PATH }}/android
         run: |
-          ./gradlew assembleDebug --no-daemon --stacktrace | tee "${{ env.LOG_DIR }}/gradle-debug.log"
+          ./gradlew assembleDebug --no-daemon --stacktrace | tee "${LOG_DIR}/gradle-debug.log"
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
@@ -110,7 +132,7 @@ jobs:
       - name: Build APK (Release unsigned)
         working-directory: ${{ env.APP_PATH }}/android
         run: |
-          ./gradlew assembleRelease --no-daemon --stacktrace | tee "${{ env.LOG_DIR }}/gradle-release.log"
+          ./gradlew assembleRelease --no-daemon --stacktrace | tee "${LOG_DIR}/gradle-release.log"
 
       - name: Upload Release APK (unsigned)
         uses: actions/upload-artifact@v4
