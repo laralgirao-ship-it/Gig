@@ -17,7 +17,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 18
-          cache: npm
+          cache: 'npm'
 
       - name: Install dependencies
         run: |
@@ -36,12 +36,12 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | sdkmanager --licenses
 
-      - name: Prepare Expo prebuild
+      - name: Expo prebuild (Android) + force SDK 36
         run: |
           npx expo prebuild --platform android --non-interactive
           sed -i 's/^android\.compileSdkVersion=.*/android.compileSdkVersion=36/g' android/gradle.properties || true
-          sed -i 's/^android\.targetSdkVersion=.*/android.targetSdkVersion=36/g' android/gradle.properties || true
-          grep -q '^android.useAndroidX=true' android/gradle.properties || echo 'android.useAndroidX=true' >> android/gradle.properties
+          sed -i 's/^android\.targetSdkVersion=.*/android.targetSdkVersion=36/g'   android/gradle.properties || true
+          grep -q '^android.useAndroidX=true'    android/gradle.properties || echo 'android.useAndroidX=true'    >> android/gradle.properties
           grep -q '^android.enableJetifier=true' android/gradle.properties || echo 'android.enableJetifier=true' >> android/gradle.properties
 
       - name: Build APK (Debug)
@@ -51,5 +51,15 @@ jobs:
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
+          name: app-debug-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Build APK (Release unsigned)
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Upload Release (unsigned)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-unsigned-apk
+          path: android/app/build/outputs/apk/release/app-release-unsigned.apk
