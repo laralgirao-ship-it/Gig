@@ -7,6 +7,7 @@ on:
 
 env:
   APP_PATH: ROV_Project/ROV_VoiceApp
+  LOG_DIR: ROV_Project/ROV_VoiceApp/_logs
 
 jobs:
   build:
@@ -16,19 +17,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Print repo tree (root)
+      - name: Ensure logs dir + show tree
         run: |
-          pwd
+          mkdir -p "${{ env.LOG_DIR }}"
+          echo "ROOT:"
           ls -la
-          echo "----"
-          ls -la "$APP_PATH" || true
+          echo "APP_PATH:"
+          ls -la "${{ env.APP_PATH }}" || true
 
-      - name: Setup Node.js
+      - name: Setup Node.js (no cache)
         uses: actions/setup-node@v4
         with:
           node-version: 18
-          cache: npm
-          cache-dependency-path: ${{ env.APP_PATH }}/package-lock.json
 
       - name: Install dependencies
         working-directory: ${{ env.APP_PATH }}
@@ -52,7 +52,7 @@ jobs:
         working-directory: ${{ env.APP_PATH }}
         run: |
           set -e
-          npx expo prebuild --platform android --non-interactive | tee ../_prebuild.log
+          npx expo prebuild --platform android --non-interactive | tee "${{ env.LOG_DIR }}/prebuild.log"
           sed -i 's/^android\.compileSdkVersion=.*/android.compileSdkVersion=36/g' android/gradle.properties || true
           sed -i 's/^android\.targetSdkVersion=.*/android.targetSdkVersion=36/g'   android/gradle.properties || true
           grep -q '^android.useAndroidX=true'    android/gradle.properties || echo 'android.useAndroidX=true'    >> android/gradle.properties
@@ -62,36 +62,31 @@ jobs:
       - name: Build APK (Debug)
         working-directory: ${{ env.APP_PATH }}/android
         run: |
-          ./gradlew --version
-          ./gradlew assembleDebug --no-daemon --stacktrace | tee ../../_gradle-debug.log
+          ./gradlew assembleDebug --no-daemon --stacktrace | tee "${{ env.LOG_DIR }}/gradle-debug.log"
 
-      - name: Upload Debug APK (if exists)
-        if: always()
+      - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug-apk
           path: ${{ env.APP_PATH }}/android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: ignore
 
-      - name: Upload logs (always)
+      - name: Build APK (Release unsigned)
+        working-directory: ${{ env.APP_PATH }}/android
+        run: |
+          ./gradlew assembleRelease --no-daemon --stacktrace | tee "${{ env.LOG_DIR }}/gradle-release.log"
+
+      - name: Upload Release APK (unsigned)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-unsigned-apk
+          path: ${{ env.APP_PATH }}/android/app/build/outputs/apk/release/app-release-unsigned.apk
+          if-no-files-found: ignore
+
+      - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
-          path: |
-            ${{ env.APP_PATH }}/../_prebuild.log
-            ${{ env.APP_PATH }}/../_gradle-debug.log
-
-      - name: Build APK (Release unsigned)
-        working-directory: ${{ env.APP_PATH }}/android
-        run: ./gradlew assembleRelease --no-daemon --stacktrace | tee ../../_gradle-release.log
-
-      - name: Upload Release (unsigned) + logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release-unsigned-apk-and-logs
-          path: |
-            ${{ env.APP_PATH }}/android/app/build/outputs/apk/release/app-release-unsigned.apk
-            ${{ env.APP_PATH }}/../_gradle-release.log
-          if-no-files-found: ignore
+          path: ${{ env.LOG_DIR }}/*.log
+          if-no-files-found: warn
