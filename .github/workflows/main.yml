@@ -1,0 +1,67 @@
+name: Build Android APK (Expo prebuild + Gradle)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: |
+          npm ci || npm i
+
+      - name: Expo prebuild (Android)
+        run: npx expo prebuild --platform android --non-interactive
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses
+
+      - name: Force compile/target SDK = 36
+        run: |
+          sed -i 's/^android\.compileSdkVersion=.*/android.compileSdkVersion=36/g' android/gradle.properties || true
+          sed -i 's/^android\.targetSdkVersion=.*/android.targetSdkVersion=36/g'   android/gradle.properties || true
+          grep -q '^android.compileSdkVersion=36' android/gradle.properties || echo 'android.compileSdkVersion=36' >> android/gradle.properties
+          grep -q '^android.targetSdkVersion=36'  android/gradle.properties || echo 'android.targetSdkVersion=36'  >> android/gradle.properties
+          grep -q '^android.useAndroidX=true'     android/gradle.properties || echo 'android.useAndroidX=true'     >> android/gradle.properties
+          grep -q '^android.enableJetifier=true'  android/gradle.properties || echo 'android.enableJetifier=true'  >> android/gradle.properties
+
+      - name: Build APK (Debug)
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK (Debug)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Build APK (Release unsigned)
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Upload APK (Release unsigned)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-unsigned-apk
+          path: android/app/build/outputs/apk/release/app-release-unsigned.apk
