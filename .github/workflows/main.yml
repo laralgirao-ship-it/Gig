@@ -1,163 +1,27 @@
-name: Build Android APK (Expo + Gradle)
+name: Find APK Path (Expo + Gradle)
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
-
-env:
-  APP_PATH: .
-  LOG_DIR: _logs
-  ROOT_LOG_DIR: ${{ github.workspace }}/_logs
-  CI: "1"
-  NODE_ENV: production
-  EXPO_NO_TELEMETRY: "1"
 
 jobs:
-  build:
+  find-apk:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Prepare logs dir
-        run: mkdir -p "$ROOT_LOG_DIR"
-
-      - name: Sanity check
-        run: |
-          test -f "${APP_PATH}/package.json" || { echo "❌ package.json não encontrado em ${APP_PATH}"; exit 1; }
-          test -f "${APP_PATH}/app.json" || { echo "⚠️ app.json não existe, criaremos android.package no próximo passo se necessário."; }
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 18
 
-      - name: Patch package.json (safe)
-        working-directory: ${{ env.APP_PATH }}
+      - name: Install Expo + Gradle environment
         run: |
-          node -e '
-            const fs=require("fs"), p="package.json";
-            const pkg=JSON.parse(fs.readFileSync(p,"utf8"));
-            const d=pkg.dependencies||(pkg.dependencies={});
-            if(d["react-native-voice"]){ delete d["react-native-voice"]; console.log("Removed react-native-voice"); }
-            if(!d["expo-speech"]){ d["expo-speech"]="*"; console.log("Added expo-speech"); }
-            if(d["react-native-svg"] && d["react-native-svg"]!=="15.12.1"){ d["react-native-svg"]="15.12.1"; console.log("Pinned react-native-svg@15.12.1"); }
-            fs.writeFileSync(p, JSON.stringify(pkg,null,2));
-            console.log("Patched", p);
-          ' || true
+          npm install -g expo-cli
+          sudo apt-get update && sudo apt-get install -y gradle openjdk-17-jdk
 
-      - name: Install dependencies
-        working-directory: ${{ env.APP_PATH }}
+      - name: Expo prebuild
         run: |
-          npm install --no-audit --no-fund
-          npx expo --version || npx --yes expo-cli --version || true
-
-      - name: Setup Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses
-
-      - name: Ensure android.package in app.json
-        working-directory: ${{ env.APP_PATH }}
-        run: |
-          node -e '
-            const fs=require("fs"), p="app.json";
-            if(!fs.existsSync(p)) { console.log("No app.json, skipping"); process.exit(0); }
-            const cfg=JSON.parse(fs.readFileSync(p,"utf8"));
-            cfg.expo = cfg.expo || {};
-            cfg.expo.android = cfg.expo.android || {};
-            if(!cfg.expo.android.package){
-              cfg.expo.android.package = "com.laralgirao.rovassistant";
-              cfg.expo.android.versionCode = cfg.expo.android.versionCode || 1;
-              console.log("Set android.package to", cfg.expo.android.package);
-            } else {
-              console.log("android.package already set:", cfg.expo.android.package);
-              cfg.expo.android.versionCode = cfg.expo.android.versionCode || 1;
-            }
-            fs.writeFileSync(p, JSON.stringify(cfg,null,2));
-          '
-
-      - name: Expo prebuild (Android)
-        working-directory: ${{ env.APP_PATH }}
-        run: |
-          npx expo prebuild --platform android --no-install | tee "${ROOT_LOG_DIR}/prebuild.log"
-          test -d android || { echo "❌ prebuild não gerou ./android. Veja ${ROOT_LOG_DIR}/prebuild.log"; exit 1; }
-
-      - name: Force SDK 36 + Gradle tuning
-        run: |
-          G="android/gradle.properties"
-          test -f "$G" || { echo "❌ $G não encontrado"; exit 1; }
-          sed -i 's|^android\.compileSdkVersion=.*|android.compileSdkVersion=36|' "$G" || true
-          sed -i 's|^android\.targetSdkVersion=.*|android.targetSdkVersion=36|' "$G"   || true
-          grep -q '^android.useAndroidX=' "$G" || echo 'android.useAndroidX=true' >> "$G"
-          sed -i 's|^android\.enableJetifier=.*|android.enableJetifier=false|' "$G" || echo 'android.enableJetifier=false' >> "$G"
-          grep -q '^org.gradle.jvmargs=' "$G" \
-            && sed -i 's|^org.gradle.jvmargs=.*|org.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1024m -Dkotlin.daemon.jvm.options="-Xmx2g"|' "$G" \
-            || echo 'org.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1024m -Dkotlin.daemon.jvm.options="-Xmx2g"' >> "$G"
-          grep -q '^org.gradle.workers.max=' "$G" || echo 'org.gradle.workers.max=2' >> "$G"
-          grep -q '^org.gradle.parallel=' "$G"     && sed -i 's|^org.gradle.parallel=.*|org.gradle.parallel=false|' "$G" || echo 'org.gradle.parallel=false' >> "$G"
-          chmod +x "android/gradlew" || true
-          echo "==== gradle.properties ===="
-          cat "$G"
-
-      - name: Build APK (Debug)
-        working-directory: android
-        run: ./gradlew assembleDebug --no-daemon --stacktrace --info | tee "${ROOT_LOG_DIR}/gradle-debug.log"
-
-      - name: Build APK (Release unsigned)
-        working-directory: android
-        run: ./gradlew assembleRelease --no-daemon --stacktrace --info | tee "${ROOT_LOG_DIR}/gradle-release.log"
-
-      - name: Discover APK paths
-        id: apks
-        run: |
-          set -e
+          npx expo prebuild --platform android --no-install || true
           echo "=== Searching for APKs ==="
-          find android -type f -name "*.apk" | sort
-          DEBUG_PATH=$(ls -t android/app/build/outputs/apk/**/app-*-debug*.apk 2>/dev/null | head -n1 || true)
-          RELEASE_PATH=$(ls -t android/app/build/outputs/apk/**/app-*-release*.apk 2>/dev/null | head -n1 || true)
-          echo "debug=$DEBUG_PATH"   >> $GITHUB_OUTPUT
-          echo "release=$RELEASE_PATH" >> $GITHUB_OUTPUT
-          echo "Found debug:   $DEBUG_PATH"
-          echo "Found release: $RELEASE_PATH"
-
-      - name: Upload Debug APK
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-debug-apk
-          path: ${{ steps.apks.outputs.debug }}
-          if-no-files-found: warn
-
-      - name: Upload Release APK (unsigned)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release-unsigned-apk
-          path: ${{ steps.apks.outputs.release }}
-          if-no-files-found: warn
-
-      - name: Upload whole outputs dir (fallback)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: outputs-apk-tree
-          path: android/app/build/outputs/apk/**/*
-          if-no-files-found: warn
-
-      - name: Upload build logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: ${{ env.ROOT_LOG_DIR }}/*.log
-          if-no-files-found: warn
+          find . -type f -name "*.apk" -o -name "gradle.properties" -o -name "build.gradle" | sort
