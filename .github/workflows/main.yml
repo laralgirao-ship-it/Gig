@@ -6,7 +6,7 @@ on:
     branches: [ main ]
 
 env:
-  APP_PATH: ROV_Project/ROV_VoiceApp
+  APP_PATH: .
   EAS_SKIP_AUTO_FINGERPRINT: 1
   CONCURRENCY: 1
 
@@ -18,76 +18,64 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Node.js sem cache (evita erro de lockfile)
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 18
 
-      # Mostrar estrutura do projeto
       - name: Print directory tree
         run: |
           pwd
-          ls -R "${{ env.APP_PATH }}" || true
+          ls -la
 
-      # Instalar dependências
       - name: Install dependencies
         run: |
-          cd "${{ env.APP_PATH }}"
           npm install --legacy-peer-deps
 
-      # Forçar SDK e prebuild do Expo (gera android/)
       - name: Expo prebuild (Android)
         run: |
-          cd "${{ env.APP_PATH }}"
           npx expo prebuild --platform android || true
           cd android
           echo "android.useAndroidX=true" >> gradle.properties
           echo "android.enableJetifier=true" >> gradle.properties
           echo "org.gradle.jvmargs=-Xmx4096m" >> gradle.properties
-          cd ../..
+          cd ..
 
-      # Build debug APK
       - name: Build APK (Debug)
         run: |
-          cd "${{ env.APP_PATH }}/android"
+          cd android
           ./gradlew assembleDebug --no-daemon --stacktrace
 
-      # Build release APK (unsigned)
       - name: Build APK (Release unsigned)
         run: |
-          cd "${{ env.APP_PATH }}/android"
+          cd android
           ./gradlew assembleRelease --no-daemon --stacktrace
 
-      # Mostrar caminhos dos APKs gerados
       - name: Discover APK paths
         run: |
           echo "=== APK FILES FOUND ==="
-          find "${{ env.APP_PATH }}" -type f -name "*.apk" || echo "No APKs found"
+          find . -type f -name "*.apk" || echo "No APKs found"
 
-      # Upload do APK de debug
       - name: Upload Debug APK
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-apk
-          path: ${{ env.APP_PATH }}/android/app/build/outputs/apk/debug/*.apk
+          path: android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: warn
 
-      # Upload do APK de release
       - name: Upload Release APK (unsigned)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: release-apk-unsigned
-          path: ${{ env.APP_PATH }}/android/app/build/outputs/apk/release/*.apk
+          path: android/app/build/outputs/apk/release/*.apk
           if-no-files-found: warn
 
-      # Upload dos logs de build (útil para debug)
       - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
-          path: ${{ env.APP_PATH }}/android/app/build/*.log
+          path: android/app/build/*.log
           if-no-files-found: warn
