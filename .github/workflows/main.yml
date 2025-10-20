@@ -9,12 +9,13 @@ env:
   APP_PATH: .
   LOG_DIR: _logs
   ROOT_LOG_DIR: ${{ github.workspace }}/_logs
+  CI: "1"
+  NODE_ENV: production
+  EXPO_NO_TELEMETRY: "1"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      CI: "1"  # modo não-interativo para Expo/Gradle
 
     steps:
       - name: Checkout repository
@@ -23,14 +24,10 @@ jobs:
       - name: Prepare logs dir
         run: mkdir -p "$ROOT_LOG_DIR"
 
-      - name: Show tree (root)
-        run: |
-          echo "ROOT:"; ls -la
-          echo "APP:";  ls -la "${APP_PATH}" || true
-
       - name: Sanity check
         run: |
           test -f "${APP_PATH}/package.json" || { echo "❌ package.json não encontrado em ${APP_PATH}"; exit 1; }
+          test -f "${APP_PATH}/app.json" || { echo "⚠️ app.json não existe, criaremos android.package no próximo passo se necessário."; }
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -47,7 +44,8 @@ jobs:
             if(d["react-native-voice"]){ delete d["react-native-voice"]; console.log("Removed react-native-voice"); }
             if(!d["expo-speech"]){ d["expo-speech"]="*"; console.log("Added expo-speech"); }
             if(d["react-native-svg"] && d["react-native-svg"]!=="15.12.1"){ d["react-native-svg"]="15.12.1"; console.log("Pinned react-native-svg@15.12.1"); }
-            fs.writeFileSync(p, JSON.stringify(pkg,null,2)); console.log("Patched", p);
+            fs.writeFileSync(p, JSON.stringify(pkg,null,2));
+            console.log("Patched", p);
           ' || true
 
       - name: Install dependencies
@@ -94,21 +92,19 @@ jobs:
           npx expo prebuild --platform android --no-install | tee "${ROOT_LOG_DIR}/prebuild.log"
           test -d android || { echo "❌ prebuild não gerou ./android. Veja ${ROOT_LOG_DIR}/prebuild.log"; exit 1; }
 
-      # 🔧 AQUI: +Memória, menos paralelismo e Jetifier OFF (evita JetifyTransform no Hermes)
-      - name: Bump Gradle memory + disable Jetifier
+      - name: Force SDK 36 + Gradle tuning
         run: |
           G="android/gradle.properties"
           test -f "$G" || { echo "❌ $G não encontrado"; exit 1; }
-          # Memória do Gradle e Kotlin
+          sed -i 's|^android\.compileSdkVersion=.*|android.compileSdkVersion=36|' "$G" || true
+          sed -i 's|^android\.targetSdkVersion=.*|android.targetSdkVersion=36|' "$G"   || true
+          grep -q '^android.useAndroidX=' "$G" || echo 'android.useAndroidX=true' >> "$G"
+          sed -i 's|^android\.enableJetifier=.*|android.enableJetifier=false|' "$G" || echo 'android.enableJetifier=false' >> "$G"
           grep -q '^org.gradle.jvmargs=' "$G" \
             && sed -i 's|^org.gradle.jvmargs=.*|org.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1024m -Dkotlin.daemon.jvm.options="-Xmx2g"|' "$G" \
             || echo 'org.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1024m -Dkotlin.daemon.jvm.options="-Xmx2g"' >> "$G"
-          # Reduz workers / paralelismo para aliviar heap
           grep -q '^org.gradle.workers.max=' "$G" || echo 'org.gradle.workers.max=2' >> "$G"
           grep -q '^org.gradle.parallel=' "$G"     && sed -i 's|^org.gradle.parallel=.*|org.gradle.parallel=false|' "$G" || echo 'org.gradle.parallel=false' >> "$G"
-          # AndroidX ok, Jetifier desnecessário no Expo SDK atual
-          sed -i 's|^android.enableJetifier=.*|android.enableJetifier=false|' "$G" || true
-          grep -q '^android.useAndroidX=' "$G" || echo 'android.useAndroidX=true' >> "$G"
           chmod +x "android/gradlew" || true
           echo "==== gradle.properties ===="
           cat "$G"
@@ -117,22 +113,45 @@ jobs:
         working-directory: android
         run: ./gradlew assembleDebug --no-daemon --stacktrace --info | tee "${ROOT_LOG_DIR}/gradle-debug.log"
 
-      - name: Upload Debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-debug-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: warn
-
       - name: Build APK (Release unsigned)
         working-directory: android
         run: ./gradlew assembleRelease --no-daemon --stacktrace --info | tee "${ROOT_LOG_DIR}/gradle-release.log"
 
+      - name: Discover APK paths
+        id: apks
+        run: |
+          set -e
+          echo "=== Searching for APKs ==="
+          find android -type f -name "*.apk" | sort
+          DEBUG_PATH=$(ls -t android/app/build/outputs/apk/**/app-*-debug*.apk 2>/dev/null | head -n1 || true)
+          RELEASE_PATH=$(ls -t android/app/build/outputs/apk/**/app-*-release*.apk 2>/dev/null | head -n1 || true)
+          echo "debug=$DEBUG_PATH"   >> $GITHUB_OUTPUT
+          echo "release=$RELEASE_PATH" >> $GITHUB_OUTPUT
+          echo "Found debug:   $DEBUG_PATH"
+          echo "Found release: $RELEASE_PATH"
+
+      - name: Upload Debug APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: ${{ steps.apks.outputs.debug }}
+          if-no-files-found: warn
+
       - name: Upload Release APK (unsigned)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: app-release-unsigned-apk
-          path: android/app/build/outputs/apk/release/app-release-unsigned.apk
+          path: ${{ steps.apks.outputs.release }}
+          if-no-files-found: warn
+
+      - name: Upload whole outputs dir (fallback)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: outputs-apk-tree
+          path: android/app/build/outputs/apk/**/*
           if-no-files-found: warn
 
       - name: Upload build logs
