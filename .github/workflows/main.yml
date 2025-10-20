@@ -6,16 +6,15 @@ on:
     branches: [ main ]
 
 env:
-  APP_PATH: .
-  EAS_SKIP_AUTO_FINGERPRINT: 1
-  CONCURRENCY: 1
+  CI: true
+  NODE_ENV: production
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Node.js
@@ -23,44 +22,102 @@ jobs:
         with:
           node-version: 18
 
-      - name: Print directory tree
+      - name: Show tree
         run: |
           pwd
           ls -la
 
-      - name: Install dependencies
+      # Garante pacote de voz correto e remove lock quebrado
+      - name: Fix voice dependency
         run: |
-          npm install --legacy-peer-deps
+          rm -f package-lock.json yarn.lock npm-shrinkwrap.json || true
+          node - <<'NODE'
+          const fs = require('fs');
+          const p='package.json';
+          const pkg=JSON.parse(fs.readFileSync(p,'utf8'));
+          pkg.dependencies = pkg.dependencies || {};
+          delete pkg.dependencies['react-native-voice'];
+          if (!pkg.dependencies['@react-native-voice/voice']) {
+            pkg.dependencies['@react-native-voice/voice']='^3.2.4';
+          }
+          fs.writeFileSync(p, JSON.stringify(pkg,null,2)+"\n");
+          console.log('✔ package.json fixado para @react-native-voice/voice ^3.2.4');
+          NODE
+          [ -f App.js ] && sed -i "s/['\"\\`]react-native-voice['\"\\`]/@react-native-voice\\/voice/g" App.js || true
+          grep -n '"@react-native-voice/voice"' package.json || (echo "❌ Falta @react-native-voice/voice" && exit 1)
+
+      # Garante app.json válido: android.package + plugin build-properties (sdk 36, Hermes off)
+      - name: Patch app.json (android.package, build-properties, Hermes off)
+        run: |
+          node - <<'NODE'
+          const fs=require('fs'); const p='app.json';
+          if(!fs.existsSync(p)){ console.error('❌ app.json não encontrado'); process.exit(1); }
+          const j=JSON.parse(fs.readFileSync(p,'utf8'));
+          j.expo = j.expo || {};
+          j.expo.android = j.expo.android || {};
+          if(!j.expo.android.package) j.expo.android.package = "com.laralgirao.rovvoiceapp";
+          const want = ["expo-build-properties",{
+            android: { compileSdkVersion: 36, targetSdkVersion: 36, kotlinVersion: "1.9.24", enableProguardInReleaseBuilds: false, extraProguardRules: "" },
+            ios: { deploymentTarget: "13.4" }
+          }];
+          j.expo.plugins = j.expo.plugins || [];
+          const idx = j.expo.plugins.findIndex(x => Array.isArray(x) && x[0]==="expo-build-properties");
+          if (idx>=0) j.expo.plugins[idx]=want; else j.expo.plugins.push(want);
+          // usa JSC para reduzir chance de OOM no Jetifier
+          j.expo.jsEngine = "jsc";
+          fs.writeFileSync(p, JSON.stringify(j,null,2)+"\n");
+          console.log('✔ app.json patch: android.package, build-properties, jsEngine=jsc');
+          NODE
+          cat app.json
+
+      - name: Install deps
+        run: npm install --legacy-peer-deps
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept licenses
+        run: yes | sdkmanager --licenses
 
       - name: Expo prebuild (Android)
+        run: npx expo prebuild --platform android
+
+      - name: Bump Gradle memory and AndroidX/Jetifier
         run: |
-          npx expo prebuild --platform android || true
-          cd android
-          echo "android.useAndroidX=true" >> gradle.properties
-          echo "android.enableJetifier=true" >> gradle.properties
-          echo "org.gradle.jvmargs=-Xmx4096m" >> gradle.properties
-          cd ..
+          sed -i 's/^org\.gradle\.jvmargs=.*/org.gradle.jvmargs=-Xmx6144m -Dkotlin.daemon.jvm.options=-Xmx2048m/g' android/gradle.properties || echo "org.gradle.jvmargs=-Xmx6144m -Dkotlin.daemon.jvm.options=-Xmx2048m" >> android/gradle.properties
+          grep -q '^android.useAndroidX=true'    android/gradle.properties || echo 'android.useAndroidX=true'    >> android/gradle.properties
+          grep -q '^android.enableJetifier=true' android/gradle.properties || echo 'android.enableJetifier=true' >> android/gradle.properties
+          echo "GRADLE_USER_HOME=$HOME/.gradle" >> $GITHUB_ENV
+          echo "JAVA_TOOL_OPTIONS=-Xmx3g" >> $GITHUB_ENV
 
       - name: Build APK (Debug)
-        run: |
-          cd android
-          ./gradlew assembleDebug --no-daemon --stacktrace
+        working-directory: android
+        run: ./gradlew --no-daemon --stacktrace assembleDebug
 
       - name: Build APK (Release unsigned)
-        run: |
-          cd android
-          ./gradlew assembleRelease --no-daemon --stacktrace
+        if: always()
+        working-directory: android
+        run: ./gradlew --no-daemon --stacktrace assembleRelease || true
 
-      - name: Discover APK paths
+      - name: List outputs
+        if: always()
         run: |
-          echo "=== APK FILES FOUND ==="
-          find . -type f -name "*.apk" || echo "No APKs found"
+          echo "=== APKs ==="
+          find android/app/build/outputs -type f -name "*.apk" -print || true
+          echo "=== Logs ==="
+          find android -type f -name "*.log" -print || true
 
       - name: Upload Debug APK
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-apk
+          name: app-debug
           path: android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: warn
 
@@ -68,14 +125,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: release-apk-unsigned
+          name: app-release-unsigned
           path: android/app/build/outputs/apk/release/*.apk
           if-no-files-found: warn
 
-      - name: Upload build logs
+      - name: Upload ALL build outputs (fallback)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-logs
-          path: android/app/build/*.log
+          name: android-outputs
+          path: android/app/build/outputs/**
           if-no-files-found: warn
