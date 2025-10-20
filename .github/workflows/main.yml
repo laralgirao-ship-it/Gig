@@ -1,11 +1,19 @@
-name: Find APK Path (Expo + Gradle)
+name: Build Android APK (Expo + Gradle)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ main ]
+
+env:
+  APP_PATH: ROV_Project/ROV_VoiceApp
+  EAS_SKIP_AUTO_FINGERPRINT: 1
+  CONCURRENCY: 1
 
 jobs:
-  find-apk:
+  build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -14,14 +22,58 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 18
+          cache: npm
 
-      - name: Install Expo + Gradle environment
+      - name: Print directory tree
         run: |
-          npm install -g expo-cli
-          sudo apt-get update && sudo apt-get install -y gradle openjdk-17-jdk
+          pwd
+          ls -R "${{ env.APP_PATH }}" || true
 
-      - name: Expo prebuild
+      - name: Install dependencies
         run: |
-          npx expo prebuild --platform android --no-install || true
-          echo "=== Searching for APKs ==="
-          find . -type f -name "*.apk" -o -name "gradle.properties" -o -name "build.gradle" | sort
+          cd "${{ env.APP_PATH }}"
+          npm install --legacy-peer-deps
+
+      - name: Expo prebuild (Android)
+        run: |
+          cd "${{ env.APP_PATH }}"
+          npx expo prebuild --platform android || true
+
+      - name: Build APK (Debug)
+        run: |
+          cd "${{ env.APP_PATH }}/android"
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Build APK (Release unsigned)
+        run: |
+          cd "${{ env.APP_PATH }}/android"
+          ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Discover APK paths
+        run: |
+          echo "=== APK FILES FOUND ==="
+          find "${{ env.APP_PATH }}" -type f -name "*.apk" || echo "No APKs found"
+
+      - name: Upload Debug APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk
+          path: ${{ env.APP_PATH }}/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
+
+      - name: Upload Release APK (unsigned)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apk-unsigned
+          path: ${{ env.APP_PATH }}/android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: warn
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: ${{ env.APP_PATH }}/android/app/build/*.log
+          if-no-files-found: warn
